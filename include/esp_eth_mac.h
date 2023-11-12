@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include "esp_eth_com.h"
 #include "sdkconfig.h"
+#include "esp_idf_version.h"
 #if CONFIG_ETH_USE_SPI_ETHERNET
 #include "driver/spi_master.h"
 #endif
@@ -434,7 +435,9 @@ typedef struct {
     int smi_mdio_gpio_num;                  /*!< SMI MDIO GPIO number, set to -1 could bypass the SMI GPIO configuration */
     eth_data_interface_t interface;         /*!< EMAC Data interface to PHY (MII/RMII) */
     eth_mac_clock_config_t clock_config;    /*!< EMAC Interface clock configuration */
+    #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     eth_mac_dma_burst_len_t dma_burst_len;  /*!< EMAC DMA burst length for both Tx and Rx */
+    #endif
 } eth_esp32_emac_config_t;
 
 /**
@@ -514,6 +517,10 @@ typedef struct {
     spi_host_device_t spi_host_id;              /*!< SPI peripheral */
     spi_device_interface_config_t *spi_devcfg;  /*!< SPI device configuration */
     int int_gpio_num;                           /*!< Interrupt GPIO number */
+    #if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
+    spi_device_handle_t spi_hdl;
+    #endif
+
 } eth_w5500_config_t;
 
 /**

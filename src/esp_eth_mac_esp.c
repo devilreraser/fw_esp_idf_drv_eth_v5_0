@@ -7,25 +7,33 @@
 #include <stdlib.h>
 #include <sys/cdefs.h>
 #include <stdarg.h>
+#include "esp_idf_version.h"
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "esp_private/periph_ctrl.h"
+#else
+#include "driver/periph_ctrl.h"
+#endif
 #include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_eth_driver.h"
+#include "esp_eth.h"
 #include "esp_pm.h"
 #include "esp_mac.h"
 #include "esp_cpu.h"
+#include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_intr_alloc.h"
 #include "esp_private/esp_clk.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "hal/cpu_hal.h"
 #include "hal/emac_hal.h"
 #include "hal/gpio_hal.h"
 #include "soc/soc.h"
-#include "clk_ctrl_os.h"
+#include "soc/rtc.h"
 #include "sdkconfig.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
@@ -62,7 +70,9 @@ typedef struct {
 #ifdef CONFIG_PM_ENABLE
     esp_pm_lock_handle_t pm_lock;
 #endif
+    #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     eth_mac_dma_burst_len_t dma_burst_len;
+    #endif
 } emac_esp32_t;
 
 static esp_err_t esp_emac_alloc_driver_obj(const eth_mac_config_t *config, emac_esp32_t **emac_out_hdl, void **out_descriptors);
@@ -234,7 +244,7 @@ static esp_err_t emac_esp32_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
 err:
     return ret;
 }
-
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 static esp_err_t emac_esp32_transmit_multiple_bufs(esp_eth_mac_t *mac, uint32_t argc, va_list args)
 {
     esp_err_t ret = ESP_OK;
@@ -253,7 +263,7 @@ static esp_err_t emac_esp32_transmit_multiple_bufs(esp_eth_mac_t *mac, uint32_t 
 err:
     return ret;
 }
-
+#endif
 static esp_err_t emac_esp32_receive(esp_eth_mac_t *mac, uint8_t *buf, uint32_t *length)
 {
     esp_err_t ret = ESP_OK;
@@ -326,6 +336,7 @@ static void emac_esp32_init_smi_gpio(emac_esp32_t *emac)
 
 static esp_err_t emac_config_apll_clock(void)
 {
+    #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     uint32_t expt_freq = 50000000; // 50MHz
     uint32_t real_freq = 0;
     esp_err_t ret = periph_rtc_apll_freq_set(expt_freq, &real_freq);
@@ -336,7 +347,46 @@ static esp_err_t emac_config_apll_clock(void)
     // If the difference of real APLL frequency is not within 50 ppm, i.e. 2500 Hz, the APLL is unavailable
     ESP_RETURN_ON_FALSE(abs((int)real_freq - (int)expt_freq) <= 2500,
                          ESP_ERR_INVALID_STATE, TAG, "The APLL is working at an unusable frequency");
-
+    #else
+    /* apll_freq = xtal_freq * (4 + sdm2 + sdm1/256 + sdm0/65536)/((o_div + 2) * 2) */
+    rtc_xtal_freq_t rtc_xtal_freq = rtc_clk_xtal_freq_get();
+    switch (rtc_xtal_freq) {
+    case RTC_XTAL_FREQ_40M: // Recommended
+        /* 50 MHz = 40MHz * (4 + 6) / (2 * (2 + 2) = 50.000 */
+        /* sdm0 = 0, sdm1 = 0, sdm2 = 6, o_div = 2 */
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        rtc_clk_apll_enable(true);
+        #else
+        rtc_clk_apll_enable(true, 0, 0, 6, 2);
+        #endif
+        break;
+    case RTC_XTAL_FREQ_26M:
+        /* 50 MHz = 26MHz * (4 + 15 + 118 / 256 + 39/65536) / ((3 + 2) * 2) = 49.999992 */
+        /* sdm0 = 39, sdm1 = 118, sdm2 = 15, o_div = 3 */
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        rtc_clk_apll_enable(true);
+        #else
+        rtc_clk_apll_enable(true, 39, 118, 15, 3);
+        #endif
+        break;
+    case RTC_XTAL_FREQ_24M:
+        /* 50 MHz = 24MHz * (4 + 12 + 255 / 256 + 255/65536) / ((2 + 2) * 2) = 49.499977 */
+        /* sdm0 = 255, sdm1 = 255, sdm2 = 12, o_div = 2 */
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        rtc_clk_apll_enable(true);
+        #else
+        rtc_clk_apll_enable(true, 255, 255, 12, 2);
+        #endif
+        break;
+    default: // Assume we have a 40M xtal
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+        rtc_clk_apll_enable(true);
+        #else
+        rtc_clk_apll_enable(true, 0, 0, 6, 2);
+        #endif
+        break;
+    }
+    #endif
     return ESP_OK;
 }
 
@@ -410,6 +460,7 @@ static esp_err_t emac_esp32_start(esp_eth_mac_t *mac)
 static esp_err_t emac_esp32_stop(esp_eth_mac_t *mac)
 {
     emac_esp32_t *emac = __containerof(mac, emac_esp32_t, parent);
+    #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     esp_err_t ret = ESP_OK;
     int32_t to = 0;
     do {
@@ -420,6 +471,10 @@ static esp_err_t emac_esp32_stop(esp_eth_mac_t *mac)
         esp_rom_delay_us(25);
     } while (to < MAC_STOP_TIMEOUT_US);
     return ret;
+    #else
+    emac_hal_stop(&emac->hal);
+    return ESP_OK;
+    #endif
 }
 
 static esp_err_t emac_esp32_del(esp_eth_mac_t *mac)
@@ -459,9 +514,11 @@ static void esp_emac_free_driver_obj(emac_esp32_t *emac, void *descriptors)
         if (emac->intr_hdl) {
             esp_intr_free(emac->intr_hdl);
         }
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
         if (emac->use_apll) {
             periph_rtc_apll_release();
         }
+        #endif
         for (int i = 0; i < CONFIG_ETH_DMA_TX_BUFFER_NUM; i++) {
             free(emac->tx_buf[i]);
         }
@@ -512,7 +569,11 @@ static esp_err_t esp_emac_alloc_driver_obj(const eth_mac_config_t *config, emac_
     /* create rx task */
     BaseType_t core_num = tskNO_AFFINITY;
     if (config->flags & ETH_MAC_FLAG_PIN_TO_CORE) {
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
         core_num = esp_cpu_get_core_id();
+        #else
+        core_num = cpu_hal_get_core_id();
+        #endif
     }
     BaseType_t xReturned = xTaskCreatePinnedToCore(emac_esp32_rx_task, "emac_rx", config->rx_task_stack_size, emac,
                            config->rx_task_prio, &emac->rx_task_hdl, core_num);
@@ -579,10 +640,15 @@ static esp_err_t esp_emac_config_data_interface(const eth_esp32_emac_config_t *e
             }
             /* Enable RMII clock */
             emac_ll_clock_enable_rmii_output(emac->hal.ext_regs);
+
+            #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
             // Power up APLL clock
             periph_rtc_apll_acquire();
             ESP_GOTO_ON_ERROR(emac_config_apll_clock(), err, TAG, "Configure APLL for RMII failed");
             emac->use_apll = true;
+            #else
+            emac_config_apll_clock();
+            #endif
         } else {
             ESP_GOTO_ON_FALSE(false, ESP_ERR_INVALID_ARG, err, TAG, "invalid EMAC clock mode");
         }
@@ -620,7 +686,9 @@ esp_eth_mac_t *esp_eth_mac_new_esp32(const eth_esp32_emac_config_t *esp32_config
     ret_code = esp_emac_config_data_interface(esp32_config, emac);
     ESP_GOTO_ON_FALSE(ret_code == ESP_OK, NULL, err_interf, TAG, "config emac interface failed");
 
+    #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     emac->dma_burst_len = esp32_config->dma_burst_len;
+    #endif
     emac->sw_reset_timeout_ms = config->sw_reset_timeout_ms;
     emac->smi_mdc_gpio_num = esp32_config->smi_mdc_gpio_num;
     emac->smi_mdio_gpio_num = esp32_config->smi_mdio_gpio_num;
@@ -644,7 +712,9 @@ esp_eth_mac_t *esp_eth_mac_new_esp32(const eth_esp32_emac_config_t *esp32_config
     emac->parent.set_peer_pause_ability = emac_esp32_set_peer_pause_ability;
     emac->parent.enable_flow_ctrl = emac_esp32_enable_flow_ctrl;
     emac->parent.transmit = emac_esp32_transmit;
+    #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     emac->parent.transmit_vargs = emac_esp32_transmit_multiple_bufs;
+    #endif
     emac->parent.receive = emac_esp32_receive;
     return &(emac->parent);
 
