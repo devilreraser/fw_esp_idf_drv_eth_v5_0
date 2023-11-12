@@ -809,9 +809,8 @@ static esp_err_t emac_w5500_del(esp_eth_mac_t *mac)
     vTaskDelete(emac->rx_task_hdl);
     #if USE_SPI_INTERRUPT
     vTaskDelete(emac->spi_trans_task_hdl);
-    #else
-    spi_bus_remove_device(emac->spi_hdl);
     #endif
+    spi_bus_remove_device(emac->spi_hdl);
     vSemaphoreDelete(emac->spi_lock);
     free(emac);
     return ESP_OK;

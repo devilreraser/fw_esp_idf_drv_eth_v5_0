@@ -12,6 +12,7 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_eth.h"
 #include "esp_eth_driver.h"
 #include "esp_timer.h"
 #include "esp_system.h"
@@ -20,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "hal/cpu_hal.h"
 #include "dm9051.h"
 #include "sdkconfig.h"
 #include "esp_rom_gpio.h"
@@ -755,7 +757,7 @@ esp_eth_mac_t *esp_eth_mac_new_dm9051(const eth_dm9051_config_t *dm9051_config, 
     ESP_GOTO_ON_FALSE(emac, NULL, err, TAG, "calloc emac failed");
     /* dm9051 receive is driven by interrupt only for now*/
     ESP_GOTO_ON_FALSE(dm9051_config->int_gpio_num >= 0, NULL, err, TAG, "error interrupt gpio number");
-    /* SPI device init */
+	#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)    /* SPI device init */
     spi_device_interface_config_t spi_devcfg;
     memcpy(&spi_devcfg, dm9051_config->spi_devcfg, sizeof(spi_device_interface_config_t));
     if (dm9051_config->spi_devcfg->command_bits == 0 && dm9051_config->spi_devcfg->address_bits == 0) {
@@ -768,6 +770,9 @@ esp_eth_mac_t *esp_eth_mac_new_dm9051(const eth_dm9051_config_t *dm9051_config, 
     }
     ESP_GOTO_ON_FALSE(spi_bus_add_device(dm9051_config->spi_host_id, &spi_devcfg, &emac->spi_hdl) == ESP_OK,
                                             NULL, err, TAG, "adding device to SPI host #%d failed", dm9051_config->spi_host_id + 1);
+	#else
+	emac->spi_hdl = dm9051_config->spi_hdl;
+	#endif
     /* bind methods and attributes */
     emac->sw_reset_timeout_ms = mac_config->sw_reset_timeout_ms;
     emac->int_gpio_num = dm9051_config->int_gpio_num;
@@ -795,7 +800,11 @@ esp_eth_mac_t *esp_eth_mac_new_dm9051(const eth_dm9051_config_t *dm9051_config, 
     /* create dm9051 task */
     BaseType_t core_num = tskNO_AFFINITY;
     if (mac_config->flags & ETH_MAC_FLAG_PIN_TO_CORE) {
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
         core_num = esp_cpu_get_core_id();
+        #else
+        core_num = cpu_hal_get_core_id();
+        #endif
     }
     BaseType_t xReturned = xTaskCreatePinnedToCore(emac_dm9051_task, "dm9051_tsk", mac_config->rx_task_stack_size, emac,
                            mac_config->rx_task_prio, &emac->rx_task_hdl, core_num);
