@@ -11,6 +11,7 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_eth.h"
 #include "esp_eth_driver.h"
 #include "esp_system.h"
 #include "esp_intr_alloc.h"
@@ -19,7 +20,9 @@
 #include "esp_cpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
+#include "hal/cpu_hal.h"
 #include "w5500.h"
 #include "sdkconfig.h"
 
@@ -28,6 +31,16 @@ static const char *TAG = "w5500.mac";
 #define W5500_SPI_LOCK_TIMEOUT_MS (50)
 #define W5500_TX_MEM_SIZE (0x4000)
 #define W5500_RX_MEM_SIZE (0x4000)
+
+#define USE_READ_REGISTERS_20_25	1
+#define USE_SPI_INTERRUPT   		1
+
+#if USE_SPI_INTERRUPT
+typedef struct {
+    SemaphoreHandle_t spi_result_rdy;
+    spi_transaction_t* trans;
+} spi_result_struct_t;
+#endif
 
 typedef struct {
     esp_eth_mac_t parent;
@@ -39,7 +52,34 @@ typedef struct {
     int int_gpio_num;
     uint8_t addr[6];
     bool packets_remain;
+    TaskHandle_t spi_trans_task_hdl;
 } emac_w5500_t;
+
+spi_transaction_t* p_array_transactions = NULL;
+size_t n_array_transactions_count;
+
+#if USE_SPI_INTERRUPT
+// QueueHandle_t xQueue;
+
+// void spi_transaction_init(void)
+// {
+//     if (xQueue == NULL)
+//     {
+//         xQueue = xQueueCreate(64, sizeof(spi_transaction_t*));
+//     }
+// }
+
+spi_transaction_t* spi_transaction_add(spi_transaction_t* trans)
+{
+    spi_transaction_t* bkp_trans = malloc(sizeof(spi_transaction_t));
+
+    memcpy(bkp_trans, trans, sizeof(spi_transaction_t));
+
+    //xQueueSend(xQueue, &bkp_trans, portMAX_DELAY);
+
+    return bkp_trans;
+}
+#endif
 
 static inline bool w5500_lock(emac_w5500_t *emac)
 {
@@ -51,6 +91,38 @@ static inline bool w5500_unlock(emac_w5500_t *emac)
     return xSemaphoreGive(emac->spi_lock) == pdTRUE;
 }
 
+
+#if USE_SPI_INTERRUPT
+void w5500_spi_trans_result(void* args)
+{
+    emac_w5500_t *emac = (emac_w5500_t *)args;
+    esp_err_t ret;
+
+    while (1)
+    {
+        spi_transaction_t* p_trans;
+        ret = spi_device_get_trans_result(emac->spi_hdl, &p_trans, portMAX_DELAY);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "%s(%d): spi transmit result get failed", __FUNCTION__, __LINE__);
+        }
+        else
+        {
+            if (p_trans->user !=NULL)
+            {
+                spi_result_struct_t* p_spi_result_struct = p_trans->user;
+
+                memcpy(p_spi_result_struct->trans, p_trans, sizeof(spi_transaction_t));  //copy transaction data back to user
+                xSemaphoreGive(p_spi_result_struct->spi_result_rdy);
+            }
+            free(p_trans);
+        }
+    }
+}
+#endif
+
+
+
 static esp_err_t w5500_write(emac_w5500_t *emac, uint32_t address, const void *value, uint32_t len)
 {
     esp_err_t ret = ESP_OK;
@@ -59,17 +131,52 @@ static esp_err_t w5500_write(emac_w5500_t *emac, uint32_t address, const void *v
         .cmd = (address >> W5500_ADDR_OFFSET),
         .addr = ((address & 0xFFFF) | (W5500_ACCESS_MODE_WRITE << W5500_RWB_OFFSET) | W5500_SPI_OP_MODE_VDM),
         .length = 8 * len,
-        .tx_buffer = value
+        .tx_buffer = value,
+        .user = NULL
     };
-    if (w5500_lock(emac)) {
-        if (spi_device_polling_transmit(emac->spi_hdl, &trans) != ESP_OK) {
+
+#if USE_SPI_INTERRUPT
+    
+
+    //if (w5500_lock(emac)) 
+    {
+        //spi_device_acquire_bus(emac->spi_hdl, portMAX_DELAY);
+        
+        spi_transaction_t* p_trans = spi_transaction_add(&trans);
+        if (spi_device_queue_trans(emac->spi_hdl, p_trans, portMAX_DELAY) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
+            ret = ESP_FAIL;
+        }
+        else
+        {
+            //spi_device_get_trans_result(emac->spi_hdl, &p_trans, portMAX_DELAY);
+        }
+        //free(p_trans);
+
+        //spi_device_release_bus(emac->spi_hdl);
+        //w5500_unlock(emac);
+    } 
+    // else 
+    // {
+    //     ret = ESP_ERR_TIMEOUT;
+    // }
+#else
+    if (w5500_lock(emac)) 
+    {
+        if (spi_device_polling_transmit(emac->spi_hdl, &trans) != ESP_OK) 
+        {
             ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
             ret = ESP_FAIL;
         }
         w5500_unlock(emac);
-    } else {
+    } 
+    else 
+    {
         ret = ESP_ERR_TIMEOUT;
     }
+#endif
+
     return ret;
 }
 
@@ -77,25 +184,76 @@ static esp_err_t w5500_read(emac_w5500_t *emac, uint32_t address, void *value, u
 {
     esp_err_t ret = ESP_OK;
 
-    spi_transaction_t trans = {
+    spi_transaction_t trans = 
+    {
         .flags = len <= 4 ? SPI_TRANS_USE_RXDATA : 0, // use direct reads for registers to prevent overwrites by 4-byte boundary writes
         .cmd = (address >> W5500_ADDR_OFFSET),
         .addr = ((address & 0xFFFF) | (W5500_ACCESS_MODE_READ << W5500_RWB_OFFSET) | W5500_SPI_OP_MODE_VDM),
         .length = 8 * len,
-        .rx_buffer = value
+        .rx_buffer = value,
+        .user = NULL
     };
-    if (w5500_lock(emac)) {
-        if (spi_device_polling_transmit(emac->spi_hdl, &trans) != ESP_OK) {
+    
+
+ #if USE_SPI_INTERRUPT   
+    //if (w5500_lock(emac))
+    {
+        //spi_device_acquire_bus(emac->spi_hdl, portMAX_DELAY);
+        spi_transaction_t* p_trans = spi_transaction_add(&trans);
+
+        spi_result_struct_t spi_result_struct;
+        spi_result_struct.spi_result_rdy = xSemaphoreCreateBinary();
+        spi_result_struct.trans = &trans;
+        p_trans->user = &spi_result_struct; //the read data will be returned in trans variable
+
+        if (spi_device_queue_trans(emac->spi_hdl, p_trans, portMAX_DELAY) != ESP_OK)
+        {
+            ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
+            ret = ESP_FAIL;
+        }
+        else
+        {
+            //spi_device_get_trans_result(emac->spi_hdl, &p_trans, portMAX_DELAY);
+            xSemaphoreTake(spi_result_struct.spi_result_rdy, portMAX_DELAY);
+            vSemaphoreDelete(spi_result_struct.spi_result_rdy);
+            
+        }
+        //memcpy(&trans, p_trans, sizeof(spi_transaction_t));
+        //free(p_trans);
+
+        //spi_device_release_bus(emac->spi_hdl);
+        //w5500_unlock(emac);
+    } 
+    // else 
+    // {
+    //     ret = ESP_ERR_TIMEOUT;
+    // }
+    if ((trans.flags&SPI_TRANS_USE_RXDATA) && len <= 4) 
+    {
+        memcpy(value, trans.rx_data, len);  // copy register values to output
+    }
+
+#else
+    if (w5500_lock(emac)) 
+    {
+        if (spi_device_polling_transmit(emac->spi_hdl, &trans) != ESP_OK) 
+        {
             ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
             ret = ESP_FAIL;
         }
         w5500_unlock(emac);
-    } else {
+    } 
+    else 
+    {
         ret = ESP_ERR_TIMEOUT;
     }
-    if ((trans.flags&SPI_TRANS_USE_RXDATA) && len <= 4) {
+
+    if ((trans.flags&SPI_TRANS_USE_RXDATA) && len <= 4) 
+    {
         memcpy(value, trans.rx_data, len);  // copy register values to output
     }
+#endif
+
     return ret;
 }
 
@@ -507,6 +665,35 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
 {
     esp_err_t ret = ESP_OK;
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
+
+    //ESP_LOGI(TAG, LOG_COLOR(LOG_COLOR_CYAN)"emac_w5500_transmit %d bytes", length);
+
+    #if USE_READ_REGISTERS_20_25
+
+    // check if there're free memory to store this packet
+    uint16_t free_size;
+
+    // get current read pointer
+    // N/A
+
+    // get current write pointer
+    uint16_t offset;
+
+    typedef struct
+    {
+        uint16_t Sn_TX_FSR;
+        uint16_t Sn_TX_RD;
+        uint16_t Sn_TX_WR;
+    }tx_read_registers_0x20_to_0x25_t;
+
+    tx_read_registers_0x20_to_0x25_t tx_read_registers_0x20_to_0x25;
+
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_TX_FSR(0), &tx_read_registers_0x20_to_0x25, sizeof(tx_read_registers_0x20_to_0x25)), err, TAG, "read TX pointers failed");
+    free_size = __builtin_bswap16(tx_read_registers_0x20_to_0x25.Sn_TX_FSR);
+    ESP_GOTO_ON_FALSE(length <= free_size, ESP_ERR_NO_MEM, err, TAG, "free size (%d) < send length (%d)", (int)length, (int)free_size);
+    offset = __builtin_bswap16(tx_read_registers_0x20_to_0x25.Sn_TX_WR);
+    #else
     uint16_t offset = 0;
 
     // check if there're free memory to store this packet
@@ -516,6 +703,7 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
     // get current write pointer
     ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_TX_WR(0), &offset, sizeof(offset)), err, TAG, "read TX WR failed");
     offset = __builtin_bswap16(offset);
+    #endif
     // copy data to tx memory
     ESP_GOTO_ON_ERROR(w5500_write_buffer(emac, buf, length, offset), err, TAG, "write frame failed");
     // update write pointer
@@ -619,7 +807,11 @@ static esp_err_t emac_w5500_del(esp_eth_mac_t *mac)
 {
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     vTaskDelete(emac->rx_task_hdl);
+    #if USE_SPI_INTERRUPT
+    vTaskDelete(emac->spi_trans_task_hdl);
+    #else
     spi_bus_remove_device(emac->spi_hdl);
+    #endif
     vSemaphoreDelete(emac->spi_lock);
     free(emac);
     return ESP_OK;
@@ -634,6 +826,7 @@ esp_eth_mac_t *esp_eth_mac_new_w5500(const eth_w5500_config_t *w5500_config, con
     ESP_GOTO_ON_FALSE(emac, NULL, err, TAG, "no mem for MAC instance");
     /* w5500 driver is interrupt driven */
     ESP_GOTO_ON_FALSE(w5500_config->int_gpio_num >= 0, NULL, err, TAG, "invalid interrupt gpio number");
+	#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     /* SPI device init */
     spi_device_interface_config_t spi_devcfg;
     memcpy(&spi_devcfg, w5500_config->spi_devcfg, sizeof(spi_device_interface_config_t));
@@ -647,6 +840,9 @@ esp_eth_mac_t *esp_eth_mac_new_w5500(const eth_w5500_config_t *w5500_config, con
     }
     ESP_GOTO_ON_FALSE(spi_bus_add_device(w5500_config->spi_host_id, &spi_devcfg, &emac->spi_hdl) == ESP_OK,
                                             NULL, err, TAG, "adding device to SPI host #%d failed", w5500_config->spi_host_id + 1);
+	#else
+    emac->spi_hdl = w5500_config->spi_hdl;
+	#endif
     /* bind methods and attributes */
     emac->sw_reset_timeout_ms = mac_config->sw_reset_timeout_ms;
     emac->int_gpio_num = w5500_config->int_gpio_num;
@@ -674,11 +870,21 @@ esp_eth_mac_t *esp_eth_mac_new_w5500(const eth_w5500_config_t *w5500_config, con
     /* create w5500 task */
     BaseType_t core_num = tskNO_AFFINITY;
     if (mac_config->flags & ETH_MAC_FLAG_PIN_TO_CORE) {
+        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
         core_num = esp_cpu_get_core_id();
+        #else
+        core_num = cpu_hal_get_core_id();
+        #endif
     }
     BaseType_t xReturned = xTaskCreatePinnedToCore(emac_w5500_task, "w5500_tsk", mac_config->rx_task_stack_size, emac,
                            mac_config->rx_task_prio, &emac->rx_task_hdl, core_num);
     ESP_GOTO_ON_FALSE(xReturned == pdPASS, NULL, err, TAG, "create w5500 task failed");
+
+    #if USE_SPI_INTERRUPT
+    xReturned = xTaskCreatePinnedToCore(w5500_spi_trans_result, "w5500_spi", 2048+1024, (void*)emac, mac_config->rx_task_prio, &emac->spi_trans_task_hdl, core_num);
+    ESP_GOTO_ON_FALSE(xReturned == pdPASS, NULL, err, TAG, "create w5500 task spi failed");
+    #endif
+
     return &(emac->parent);
 
 err:
@@ -686,6 +892,11 @@ err:
         if (emac->rx_task_hdl) {
             vTaskDelete(emac->rx_task_hdl);
         }
+        #if USE_SPI_INTERRUPT
+        if (emac->spi_trans_task_hdl) {
+            vTaskDelete(emac->spi_trans_task_hdl);
+        }
+        #endif
         if (emac->spi_lock) {
             vSemaphoreDelete(emac->spi_lock);
         }
