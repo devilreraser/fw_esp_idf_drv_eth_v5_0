@@ -262,7 +262,7 @@ static esp_err_t emac_esp32_receive(esp_eth_mac_t *mac, uint8_t *buf, uint32_t *
     ESP_GOTO_ON_FALSE(buf && length, ESP_ERR_INVALID_ARG, err, TAG, "can't set buf and length to null");
     uint32_t receive_len = emac_hal_receive_frame(&emac->hal, buf, expected_len, &emac->frames_remain, &emac->free_rx_descriptor);
     /* we need to check the return value in case the buffer size is not enough */
-    ESP_LOGD(TAG, "receive len= %d", receive_len);
+    ESP_LOGD(TAG, "receive len= %d", (int)receive_len);
     ESP_GOTO_ON_FALSE(expected_len >= receive_len, ESP_ERR_INVALID_SIZE, err, TAG, "received buffer longer than expected");
     *length = receive_len;
     return ESP_OK;
@@ -365,9 +365,14 @@ static esp_err_t emac_esp32_init(esp_eth_mac_t *mac)
     emac_hal_reset_desc_chain(&emac->hal);
     /* init mac registers by default */
     emac_hal_init_mac_default(&emac->hal);
+    #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     /* init dma registers with selected EMAC-DMA configuration */
     emac_hal_dma_config_t dma_config = { .dma_burst_len = emac->dma_burst_len };
     emac_hal_init_dma_default(&emac->hal, &dma_config);
+    #else
+    /* init dma registers by default */
+    emac_hal_init_dma_default(&emac->hal);
+    #endif
     /* get emac address from efuse */
     ESP_GOTO_ON_ERROR(esp_read_mac(emac->addr, ESP_MAC_ETH), err, TAG, "fetch ethernet mac address failed");
     /* set MAC address to emac register */
