@@ -34,6 +34,7 @@
 #include "hal/gpio_hal.h"
 #include "soc/soc.h"
 #include "soc/rtc.h"
+#include "clk_ctrl_os.h"
 #include "sdkconfig.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"

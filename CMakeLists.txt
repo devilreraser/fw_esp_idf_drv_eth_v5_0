@@ -50,19 +50,21 @@ endif()
 
 idf_component_register(SRCS "${srcs}"
                        INCLUDE_DIRS ${include}
-                       REQUIRES esp_event # For using "ESP_EVENT_DECLARE_BASE" in header file
-                       PRIV_REQUIRES ${priv_requires})
+                       REQUIRES 
+                            esp_netif esp_pm
+                            esp_event # For using "ESP_EVENT_DECLARE_BASE" in header file
+                       PRIV_REQUIRES driver ${priv_requires})
 if(CONFIG_ETH_ENABLED)
     target_compile_options(${COMPONENT_LIB} PRIVATE "-Wno-format")
 endif()
 
 idf_build_get_property(idf_version IDF_VERSION)
 
-if(IDF_VERSION VERSION_GREATER_EQUAL "5.0")
-    if(CONFIG_ETH_ENABLED)
-        if(CONFIG_ETH_USE_SPI_ETHERNET)
-            idf_component_optional_requires(PUBLIC driver)
-        endif()
-        idf_component_optional_requires(PRIVATE esp_netif esp_pm)
-    endif()
-endif()
+#if(IDF_VERSION VERSION_GREATER_EQUAL "5.0")
+#    if(CONFIG_ETH_ENABLED)
+#        if(CONFIG_ETH_USE_SPI_ETHERNET)
+#            idf_component_optional_requires(PUBLIC driver)
+#        endif()
+#        idf_component_optional_requires(PRIVATE esp_netif esp_pm)
+#    endif()
+#endif()
