@@ -1,23 +1,21 @@
 idf_build_get_property(components_to_build BUILD_COMPONENTS)
 
-
-
-
 set(srcs)
-# set(include)
-set(priv_requires)
+set(include)
+# As CONFIG_ETH_ENABLED comes from Kconfig, it is not evaluated yet
+# when components are being registered.
+# Thus, always add the (private) requirements, regardless of Kconfig
+set(priv_requires driver log esp_timer)
 
 # If Ethernet disabled in Kconfig, this is a config-only component
 if(CONFIG_ETH_ENABLED)
-    set(srcs "src/esp_eth.c" "src/esp_eth_phy.c")
-#    set(include "include"  $ENV{IDF_PATH}/components/driver/include)
-    set(priv_requires "driver" "log" "esp_timer") # require "driver" for using some GPIO APIs
+    set(srcs "src/esp_eth.c" "src/esp_eth_phy_802_3.c")
+    set(include "include")
 
     if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         # esp_netif related
         if(esp_netif IN_LIST components_to_build)
             list(APPEND srcs "src/esp_eth_netif_glue.c")
-            list(APPEND priv_requires esp_netif esp_pm)
         endif()
     endif()
 
@@ -50,15 +48,17 @@ if(CONFIG_ETH_ENABLED)
     endif()
 endif()
 
-# set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/components/driver/include)
-
 idf_component_register(SRCS "${srcs}"
-                       INCLUDE_DIRS 
-                            "include" 
-                            "${IDF_PATH}/components/driver/include"
-                            "${IDF_PATH}/components/esp_pm/include"
-                       REQUIRES "esp_event" "driver" "esp_netif" # For using "ESP_EVENT_DECLARE_BASE" in header file
+                       INCLUDE_DIRS ${include}
+                       REQUIRES esp_event # For using "ESP_EVENT_DECLARE_BASE" in header file
                        PRIV_REQUIRES ${priv_requires})
+if(CONFIG_ETH_ENABLED)
+    target_compile_options(${COMPONENT_LIB} PRIVATE "-Wno-format")
+endif()
 
-# uses C11 atomic feature
-set_source_files_properties(src/esp_eth.c PROPERTIES COMPILE_FLAGS -std=gnu11)
+if(CONFIG_ETH_ENABLED)
+    if(CONFIG_ETH_USE_SPI_ETHERNET)
+        idf_component_optional_requires(PUBLIC driver)
+    endif()
+    idf_component_optional_requires(PRIVATE esp_netif esp_pm)
+endif()
