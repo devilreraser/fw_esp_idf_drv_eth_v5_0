@@ -288,6 +288,7 @@ err:
     return ret;
 }
 
+#if USE_READ_REGISTERS_20_25 == 0
 static esp_err_t w5500_get_tx_free_size(emac_w5500_t *emac, uint16_t *size)
 {
     esp_err_t ret = ESP_OK;
@@ -304,6 +305,7 @@ static esp_err_t w5500_get_tx_free_size(emac_w5500_t *emac, uint16_t *size)
 err:
     return ret;
 }
+#endif
 
 static esp_err_t w5500_get_rx_received_size(emac_w5500_t *emac, uint16_t *size)
 {
